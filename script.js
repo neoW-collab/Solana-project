@@ -5,11 +5,13 @@
  * - Displays last 10 token transfers with token info resolved from Solana token list
  */
 
-const RPC_ENDPOINT = "https://api.mainnet-beta.solana.com";
+const DEFAULT_RPC_ENDPOINT = "https://api.mainnet-beta.solana.com";
+let rpcEndpoint = DEFAULT_RPC_ENDPOINT;
 const SOLANA_TOKEN_LIST_URL = "https://cdn.jsdelivr.net/gh/solana-labs/token-list@main/src/tokens/solana.tokenlist.json";
 
 const el = {
   address: document.getElementById("address"),
+  rpc: document.getElementById("rpc"),
   fetchBtn: document.getElementById("fetchBtn"),
   status: document.getElementById("status"),
   statusText: document.getElementById("statusText"),
@@ -51,8 +53,23 @@ async function fetchTokenList() {
   }
 }
 
+function getRpcEndpoint() {
+  const v = (el.rpc?.value || "").trim();
+  if (!v) return rpcEndpoint;
+  try {
+    const u = new URL(v);
+    if (u.protocol === "http:" || u.protocol === "https:") {
+      return u.toString();
+    }
+  } catch (_) {
+    // ignore invalid URL, fallback
+  }
+  return rpcEndpoint;
+}
+
 async function rpc(method, params) {
-  const res = await fetch(RPC_ENDPOINT, {
+  const endpoint = getRpcEndpoint();
+  const res = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -322,13 +339,21 @@ async function fetchTransfersForAddress(address) {
 }
 
 el.fetchBtn.addEventListener("click", () => {
+  // Update state from UI before fetching
+  rpcEndpoint = getRpcEndpoint() || DEFAULT_RPC_ENDPOINT;
+
   const addr = el.address.value.trim();
   fetchTransfersForAddress(addr);
 });
 
 el.address.addEventListener("keydown", (ev) => {
   if (ev.key === "Enter") {
+    rpcEndpoint = getRpcEndpoint() || DEFAULT_RPC_ENDPOINT;
+
     const addr = el.address.value.trim();
     fetchTransfersForAddress(addr);
   }
 });
+
+if (el.rpc) {
+  // Initialize rpc input value if empty
