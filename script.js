@@ -83,31 +83,24 @@ function uiAmountFromRaw(amountStr, decimals) {
   return `${integerPart.toString()}.${fracStr}`;
 }
 
-function resolveTokenAccountOwner(tokenAccountAddr, meta) {
-  // Use preTokenBalances or postTokenBalances to map token account to owner
+function resolveTokenAccountOwner(tokenAccountAddr, tx) {
+  // Map token account (source/destination) to its owner using token balance indices
+  const meta = tx.meta;
+  const message = tx.transaction?.message;
+
+  const keys = (message?.accountKeys || []).map(k => {
+    // In jsonParsed, each key is an object { pubkey, signer, writable }
+    return typeof k === "string" ? k : k?.pubkey;
+  });
+
   const balances = [
     ...(meta?.preTokenBalances || []),
     ...(meta?.postTokenBalances || []),
   ];
+
   for (const b of balances) {
-    if (b?.accountIndex != null && b?.owner && b?.mint) {
-      // We need to resolve account index to account address in message
-      const idx = b.accountIndex;
-      const accountKeys = meta?.loadedAddresses
-        ? [...(meta.transaction?.message?.accountKeys || []), ...meta.loadedAddresses?.writable || [], ...meta.loadedAddresses?.readonly || []]
-        : meta?.transaction?.message?.accountKeys;
-      // When using getTransaction, accountKeys are at result.transaction.message.accountKeys
-    }
-  }
-  // Simpler: try match via token balances' accountIndex to transaction.message.accountKeys
-  const accountKeys = meta?.transaction?.message?.accountKeys || [];
-  const allBalances = [
-    ...(meta?.preTokenBalances || []),
-    ...(meta?.postTokenBalances || []),
-  ];
-  for (const b of allBalances) {
     const idx = b?.accountIndex;
-    if (typeof idx === "number" && accountKeys[idx]?.pubkey === tokenAccountAddr) {
+    if (typeof idx === "number" && keys[idx] === tokenAccountAddr) {
       return b.owner || null;
     }
   }
@@ -272,25 +265,42 @@ async function fetchTransfersForAddress(address) {
     setStatus("Fetching and parsing transactions…", true);
 
     const transfers = [];
-    for (const s of sigs) {
-      if (transfers.length >= 10) break;
-      const txn = await getTransaction(s.signature);
-      const txTransfers = extractTransfersFromTransaction(txn);
-      // Attach blockTime from signatures entry because sometimes txn.blockTime may be null
-      for (const t of txTransfers) {
-        if (t.signature === s.signature && !t.blockTime) t.blockTime = s.blockTime;
-      }
-      for (const t of txTransfers) {
-        // Filter to transfers where the provided address is either owner or token account involved
-        const involvesAddr = [
-          t.fromOwner, t.toOwner, t.fromTokenAcc, t.toTokenAcc
-        ].some(v => v === address);
-        if (involvesAddr) {
-          transfers.push(t);
-          if (transfers.length >= 10) break;
+
+    // Concurrency-limited fetch of transactions
+    const limit = 6;
+    let i = 0;
+
+    async function worker() {
+      while (i < sigs.length && transfers.length < 10) {
+        const idx = i++;
+        const s = sigs[idx];
+        try {
+          const txn = await getTransaction(s.signature);
+          if (!txn) continue;
+          const txTransfers = extractTransfersFromTransaction(txn);
+          // Attach blockTime from signatures entry because sometimes txn.blockTime may be null
+          for (const t of txTransfers) {
+            if (t.signature === s.signature && !t.blockTime) t.blockTime = s.blockTime;
+          }
+          for (const t of txTransfers) {
+            // Filter to transfers where the provided address is either owner or token account involved
+            const involvesAddr = [
+              t.fromOwner, t.toOwner, t.fromTokenAcc, t.toTokenAcc
+            ].some(v => v === address);
+            if (involvesAddr) {
+              transfers.push(t);
+              if (transfers.length >= 10) break;
+            }
+          }
+        } catch (err) {
+          // Ignore individual transaction errors
+          console.warn("Failed to fetch tx", s.signature, err?.message || err);
         }
       }
     }
+
+    const workers = Array.from({ length: Math.min(limit, sigs.length) }, () => worker());
+    await Promise.all(workers);
 
     setStatus("", false);
 
